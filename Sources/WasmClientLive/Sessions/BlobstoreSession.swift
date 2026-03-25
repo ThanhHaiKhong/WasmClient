@@ -16,7 +16,15 @@ extension WasmActor {
         defer { try? FileManager.default.removeItem(at: tempURL) }
 
         let action = try delegate.resolveAction(actionID: WasmClient.ActionID.upload.rawValue)
-        let result = try await instance.upload(action: action, file: tempURL.absoluteString, filename: filename)
+        let args: [String: Google_Protobuf_Value] = [
+            "file": Google_Protobuf_Value(stringValue: tempURL.absoluteString),
+            "filename": Google_Protobuf_Value(stringValue: filename),
+        ]
+        let task = try await instance.create(action: action, args: args)
+        guard task.status == .completed, task.hasValue else {
+            throw WasmClient.Error.taskFailed(status: "\(task.status)")
+        }
+        let result = try BlobstoreUploadResult(unpackingAny: task.value)
         guard !result.url.isEmpty else {
             throw WasmClient.Error.uploadFailed("Empty URL returned")
         }
@@ -27,7 +35,15 @@ extension WasmActor {
     func uploadFile(filePath: String, filename: String) async throws -> String {
         let instance = try await readyEngine()
         let action = try delegate.resolveAction(actionID: WasmClient.ActionID.upload.rawValue)
-        let result = try await instance.upload(action: action, file: filePath, filename: filename)
+        let args: [String: Google_Protobuf_Value] = [
+            "file": Google_Protobuf_Value(stringValue: filePath),
+            "filename": Google_Protobuf_Value(stringValue: filename),
+        ]
+        let task = try await instance.create(action: action, args: args)
+        guard task.status == .completed, task.hasValue else {
+            throw WasmClient.Error.taskFailed(status: "\(task.status)")
+        }
+        let result = try BlobstoreUploadResult(unpackingAny: task.value)
         guard !result.url.isEmpty else {
             throw WasmClient.Error.uploadFailed("Empty URL returned")
         }

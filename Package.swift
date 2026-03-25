@@ -22,7 +22,10 @@ let package = Package(
             url: "https://github.com/apple/swift-protobuf.git",
             branch: "main"
         ),
-        .package(path: "../flow-kit"),
+        .package(
+            url: "https://github.com/mahainc/flow-kit.git",
+            from: "1.2.3"
+        ),
     ],
     targets: [
         .target(
@@ -42,7 +45,7 @@ let package = Package(
             ],
             swiftSettings: [
                 .unsafeFlags([
-                    "-I", "\(packageDir)/../flow-kit/FlowKit.xcframework/ios-arm64_x86_64-simulator/FlowKit.framework/Modules",
+                    "-I", "\(packageDir)/.build/artifacts/flow-kit/FlowKit/FlowKit.xcframework/ios-arm64_x86_64-simulator/FlowKit.framework/Modules",
                 ]),
             ]
         ),

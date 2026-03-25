@@ -8,60 +8,89 @@ import WasmClient
 extension WasmActor {
 
     /// Send a chat message and return the full response.
-    /// Uses FlowKit's built-in OpenAIChatSession for API communication.
     func chatSend(
         config: WasmClient.ChatConfig,
         messages: [WasmClient.ChatMessage]
     ) async throws -> WasmClient.ChatMessage {
-        let session = try await buildChatSession(config: config, messages: messages)
+        let instance = try await readyEngine()
+        let action = try delegate.resolveAction(actionID: WasmClient.ActionID.chat.rawValue)
 
-        // Send the last message (or nil if no user message at the end)
-        let lastMsg = messages.last
-        let response: OpenAIChatMessage
-        if let last = lastMsg, last.role == .user {
-            if !last.contentParts.isEmpty,
-               let textPart = last.contentParts.first(where: { $0.type == "text" }),
-               let imagePart = last.contentParts.first(where: { $0.type == "image_url" }) {
-                response = try await session.send(
-                    text: textPart.text,
-                    imageURL: imagePart.imageURL,
-                    detail: imagePart.imageDetail.isEmpty ? nil : imagePart.imageDetail
-                )
-            } else {
-                response = try await session.send(last.content)
-            }
-        } else {
-            response = try await session.send(nil)
+        let bodyData = try Self.buildChatBody(config: config, messages: messages, stream: false)
+        let bodyString = String(data: bodyData, encoding: .utf8)!
+
+        var args: [String: Google_Protobuf_Value] = [
+            "body": Google_Protobuf_Value(stringValue: bodyString),
+        ]
+        if !config.endpoint.isEmpty {
+            args["url"] = Google_Protobuf_Value(stringValue: config.endpoint)
+        }
+        if !config.apiKey.isEmpty {
+            args["api_key"] = Google_Protobuf_Value(stringValue: config.apiKey)
         }
 
-        return mapChatMessage(response)
+        let task = try await instance.create(action: action, args: args)
+
+        guard task.status == .completed else {
+            throw WasmClient.Error.taskFailed(status: "\(task.status)")
+        }
+        guard task.hasValue else {
+            throw WasmClient.Error.missingValue
+        }
+
+        let result = try TypesBytes(unpackingAny: task.value)
+        guard case .raw(let data) = result.data else {
+            throw WasmClient.Error.unexpectedResponseFormat
+        }
+
+        // Try full ChatCompletion parse, fall back to plain text
+        var opts = JSONDecodingOptions()
+        opts.ignoreUnknownFields = true
+        if let completion = try? OpenAIChatCompletion(jsonUTF8Data: data, options: opts),
+           let choice = completion.choices.first {
+            return Self.mapMessage(choice.message)
+        }
+
+        let text = String(data: data, encoding: .utf8) ?? ""
+        return WasmClient.ChatMessage(role: .assistant, content: text)
     }
 
     /// Stream a chat response, yielding content deltas as they arrive via SSE.
-    /// Uses FlowKit's built-in OpenAIChatSession.stream() which returns
-    /// AsyncThrowingStream<OpenAIChatChunkChoice, Error>.
     func chatStream(
         config: WasmClient.ChatConfig,
         messages: [WasmClient.ChatMessage]
     ) async throws -> AsyncThrowingStream<String, Swift.Error> {
-        let session = try await buildChatSession(config: config, messages: messages)
+        let instance = try await readyEngine()
+        let action = try delegate.resolveAction(actionID: WasmClient.ActionID.chat.rawValue)
 
-        // Stream the last message
-        let lastContent: String? = {
-            guard let last = messages.last, last.role == .user else { return nil }
-            return last.content
-        }()
-        let chunkStream = session.stream(lastContent)
+        let bodyData = try Self.buildChatBody(config: config, messages: messages, stream: true)
+        let bodyString = String(data: bodyData, encoding: .utf8)!
 
-        // Map OpenAIChatChunkChoice -> String content deltas
+        var streamArgs: [String: Google_Protobuf_Value] = [
+            "body": Google_Protobuf_Value(stringValue: bodyString),
+        ]
+        if !config.endpoint.isEmpty {
+            streamArgs["url"] = Google_Protobuf_Value(stringValue: config.endpoint)
+        }
+        if !config.apiKey.isEmpty {
+            streamArgs["api_key"] = Google_Protobuf_Value(stringValue: config.apiKey)
+        }
+        let args = streamArgs
+
         return AsyncThrowingStream { continuation in
             Task {
+                let prev = AsyncifyWasmInternal.onSSEChunk
+                AsyncifyWasmInternal.onSSEChunk = { chunk in
+                    guard let data = chunk.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let choices = json["choices"] as? [[String: Any]],
+                          let delta = choices.first?["delta"] as? [String: Any],
+                          let content = delta["content"] as? String,
+                          !content.isEmpty else { return }
+                    continuation.yield(content)
+                }
+                defer { AsyncifyWasmInternal.onSSEChunk = prev }
                 do {
-                    for try await chunk in chunkStream {
-                        if chunk.hasDelta && chunk.delta.hasContent && !chunk.delta.content.isEmpty {
-                            continuation.yield(chunk.delta.content)
-                        }
-                    }
+                    _ = try await instance.create(action: action, args: args)
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -72,90 +101,93 @@ extension WasmActor {
 
     // MARK: - Private Chat Helpers
 
-    /// Build an OpenAIChatSession, populating history from the messages array.
-    /// The last user message is NOT added — it's passed to send()/stream().
-    private func buildChatSession(
+    private static func buildChatBody(
         config: WasmClient.ChatConfig,
-        messages: [WasmClient.ChatMessage]
-    ) async throws -> OpenAIChatSession {
-        let instance = try await readyEngine()
-        let session = OpenAIChatSession(
-            engine: instance,
-            endpoint: config.endpoint,
-            apiKey: config.apiKey,
-            model: config.model
-        )
+        messages: [WasmClient.ChatMessage],
+        stream: Bool
+    ) throws -> Data {
+        var body: [String: Any] = [
+            "model": config.model,
+            "stream": stream,
+        ]
 
-        // Set system prompt
+        var allMessages: [[String: Any]] = []
+
         if !config.systemPrompt.isEmpty {
-            session.setSystem(config.systemPrompt)
+            allMessages.append(["role": "system", "content": config.systemPrompt])
         }
 
-        // Add history messages (all except last user message which goes to send/stream)
-        let history = messages.last?.role == .user ? messages.dropLast() : messages[...]
-        for msg in history {
-            switch msg.role {
-            case .user:
-                _ = try await session.send(msg.content)
-            case .tool:
-                session.addToolResult(callId: msg.toolCallID, content: msg.content)
-            case .assistant:
-                // Assistant messages are added by send() responses, skip
-                break
-            case .system:
-                // System prompt already set above
-                break
+        for msg in messages {
+            var dict: [String: Any] = ["role": msg.role.rawValue]
+            if !msg.contentParts.isEmpty {
+                dict["content"] = msg.contentParts.map { part -> [String: Any] in
+                    var p: [String: Any] = ["type": part.type]
+                    if !part.text.isEmpty { p["text"] = part.text }
+                    if !part.imageURL.isEmpty {
+                        var img: [String: Any] = ["url": part.imageURL]
+                        if !part.imageDetail.isEmpty { img["detail"] = part.imageDetail }
+                        p["image_url"] = img
+                    }
+                    return p
+                }
+            } else {
+                dict["content"] = msg.content
+            }
+            if !msg.toolCalls.isEmpty {
+                dict["tool_calls"] = msg.toolCalls.map { tc -> [String: Any] in
+                    ["id": tc.id, "type": tc.type, "function": [
+                        "name": tc.functionName,
+                        "arguments": tc.functionArguments,
+                    ]]
+                }
+            }
+            if !msg.toolCallID.isEmpty {
+                dict["tool_call_id"] = msg.toolCallID
+            }
+            allMessages.append(dict)
+        }
+
+        body["messages"] = allMessages
+
+        if !config.tools.isEmpty {
+            body["tools"] = config.tools.map { tool -> [String: Any] in
+                var fn: [String: Any] = ["name": tool.functionName]
+                if !tool.functionDescription.isEmpty { fn["description"] = tool.functionDescription }
+                if let params = try? JSONSerialization.jsonObject(
+                    with: Data(tool.parametersJSON.utf8)
+                ) {
+                    fn["parameters"] = params
+                }
+                if tool.strict { fn["strict"] = true }
+                return ["type": tool.type, "function": fn]
             }
         }
 
-        return session
+        return try JSONSerialization.data(withJSONObject: body)
     }
 
-    private func mapChatMessage(_ proto: OpenAIChatMessage) -> WasmClient.ChatMessage {
-        let role: WasmClient.ChatRole
-        switch proto.role {
-        case "system": role = .system
-        case "assistant": role = .assistant
-        case "tool": role = .tool
-        default: role = .user
-        }
-
-        let toolCalls = proto.toolCalls.map { tc in
-            WasmClient.ToolCall(
-                id: tc.id,
-                type: tc.type,
-                functionName: tc.function.name,
-                functionArguments: tc.function.arguments
-            )
-        }
-
-        // OpenAIAnnotation has a urlCitation sub-message
-        let annotations = proto.annotations.map { ann in
-            WasmClient.Annotation(
-                type: ann.type,
-                url: ann.hasURLCitation ? ann.urlCitation.url : "",
-                title: ann.hasURLCitation ? ann.urlCitation.title : "",
-                startIndex: ann.hasURLCitation ? Int(ann.urlCitation.startIndex) : 0,
-                endIndex: ann.hasURLCitation ? Int(ann.urlCitation.endIndex) : 0
-            )
-        }
-
-        let contentParts = proto.contentParts.map { part in
-            WasmClient.ContentPart(
-                type: part.type,
-                text: part.text,
-                imageURL: part.hasImageURL ? part.imageURL.url : "",
-                imageDetail: part.hasImageURL ? part.imageURL.detail : ""
-            )
-        }
-
-        return WasmClient.ChatMessage(
-            role: role,
+    private static func mapMessage(_ proto: OpenAIChatMessage) -> WasmClient.ChatMessage {
+        WasmClient.ChatMessage(
+            role: WasmClient.ChatRole(rawValue: proto.role) ?? .assistant,
             content: proto.content,
-            toolCalls: toolCalls,
+            toolCalls: proto.toolCalls.map { tc in
+                WasmClient.ToolCall(
+                    id: tc.id,
+                    type: tc.type,
+                    functionName: tc.function.name,
+                    functionArguments: tc.function.arguments
+                )
+            },
             toolCallID: proto.toolCallID,
-            contentParts: contentParts,
-            annotations: annotations
+            annotations: proto.annotations.map { ann in
+                WasmClient.Annotation(
+                    type: ann.type,
+                    url: ann.hasURLCitation ? ann.urlCitation.url : "",
+                    title: ann.hasURLCitation ? ann.urlCitation.title : "",
+                    startIndex: ann.hasURLCitation ? Int(ann.urlCitation.startIndex) : 0,
+                    endIndex: ann.hasURLCitation ? Int(ann.urlCitation.endIndex) : 0
+                )
+            }
         )
     }
 }
