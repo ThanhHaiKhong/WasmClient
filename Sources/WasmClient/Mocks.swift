@@ -56,6 +56,29 @@ extension WasmClient {
             ]
         },
         refreshActions: { },
+        scan: { _, _, _ in
+            try await Task.sleep(nanoseconds: MockConstants.longDelay)
+            return ScanResult(
+                title: "Mock Object",
+                description: "A mock scan result for preview purposes.",
+                categoryType: "object",
+                characteristics: ["Color": "Blue", "Material": "Metal"],
+                suggestedQuestions: ["What is this?", "Where can I buy it?"],
+                price: PriceInfo(averageFairMarketPrice: "$29.99")
+            )
+        },
+        visualSearch: { _ in
+            try await Task.sleep(nanoseconds: MockConstants.mediumDelay)
+            return [
+                ShoppingProduct(title: "Similar Item", price: "$19.99", url: "https://example.com/product"),
+            ]
+        },
+        shopping: { _ in
+            try await Task.sleep(nanoseconds: MockConstants.mediumDelay)
+            return [
+                ShoppingProduct(title: "Mock Product", price: "$24.99", url: "https://example.com/shop"),
+            ]
+        },
         uploadImage: { _ in
             try await Task.sleep(nanoseconds: MockConstants.mediumDelay)
             return "https://example.com/mock-image.jpg"

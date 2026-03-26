@@ -33,6 +33,15 @@ extension WasmClient: DependencyKey {
             refreshActions: {
                 try await actor.refreshActions()
             },
+            scan: { imageData, category, language in
+                try await actor.scan(imageData: imageData, category: category, language: language)
+            },
+            visualSearch: { imageURL in
+                try await actor.visualSearch(imageURL: imageURL)
+            },
+            shopping: { query in
+                try await actor.shopping(query: query)
+            },
             uploadImage: { imageData in
                 try await actor.uploadImage(imageData: imageData)
             },

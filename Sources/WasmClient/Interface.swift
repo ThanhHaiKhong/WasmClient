@@ -50,6 +50,23 @@ public struct WasmClient: Sendable {
     /// failure during initial startup to retry provider discovery.
     public var refreshActions: @Sendable () async throws -> Void
 
+    // MARK: - Vision / Scan
+
+    /// Scan a photo: uploads to blobstore, runs vision scan, returns structured result.
+    /// - Parameters:
+    ///   - imageData: JPEG image data
+    ///   - category: scan category (default "object")
+    ///   - language: result language (default "en")
+    public var scan: @Sendable (
+        _ imageData: Data, _ category: String, _ language: String
+    ) async throws -> WasmClient.ScanResult
+
+    /// Visual search on an already-uploaded image URL. Returns matching products.
+    public var visualSearch: @Sendable (_ imageURL: String) async throws -> [WasmClient.ShoppingProduct]
+
+    /// Search for shopping products by text query.
+    public var shopping: @Sendable (_ query: String) async throws -> [WasmClient.ShoppingProduct]
+
     // MARK: - Blobstore
 
     /// Upload image data, returning the hosted URL.
