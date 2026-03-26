@@ -42,6 +42,9 @@ let package = Package(
                 .product(name: "FlowKitCModules", package: "flow-kit"),
                 "WasmClient",
             ],
+            resources: [
+                .copy("Resources/base.wasm"),
+            ],
             swiftSettings: [
                 // Merged sub-module directory created by MergeFlowKitModules plugin.
                 // Contains AsyncWasm, TaskWasm, etc. but NOT FlowKit/SwiftProtobuf

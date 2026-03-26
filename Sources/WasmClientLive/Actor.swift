@@ -47,6 +47,8 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         if let engine, isStarted { return engine }
         self.logger = logger
 
+        Self.installWasmBinaryIfNeeded(logger: logger)
+
         logger("Building engine via TaskWasm.default()...")
         var instance = try await TaskWasm.default()
         instance.premium = true
@@ -93,6 +95,41 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         isStarted = true
         stateContinuation?.yield(.running)
         return instance
+    }
+
+    /// Copy the bundled raw `base.wasm` from WasmClientLive's SPM resource bundle
+    /// into the app's Documents directory. FlowKit's `TaskWasm.default()` checks
+    /// `Bundle.main` for the wasm binary; consumers that don't manually place it
+    /// there can rely on this copy as a fallback if FlowKit also checks Documents.
+    ///
+    /// This is a best-effort operation — if it fails, the consumer must include
+    /// `base.wasm` in their app target's Copy Bundle Resources phase.
+    private static func installWasmBinaryIfNeeded(logger: @escaping @Sendable (String) -> Void) {
+        // Already in Bundle.main — nothing to do.
+        if Bundle.main.url(forResource: "base", withExtension: "wasm") != nil {
+            logger("base.wasm found in Bundle.main")
+            return
+        }
+
+        // Locate bundled copy inside WasmClientLive's SPM resource bundle.
+        guard let sourceURL = Bundle.module.url(forResource: "base", withExtension: "wasm") else {
+            logger("warning: base.wasm not found in WasmClientLive resources")
+            return
+        }
+
+        // Copy to Documents — FlowKit may check here for cached/downloaded binaries.
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let destURL = docs.appending(path: "base.wasm")
+
+        if fm.fileExists(atPath: destURL.path()) { return }
+
+        do {
+            try fm.copyItem(at: sourceURL, to: destURL)
+            logger("Installed base.wasm to Documents/")
+        } catch {
+            logger("warning: failed to install base.wasm — \(error.localizedDescription)")
+        }
     }
 
     /// Start the engine on the main actor — FlowKit requires main thread.
