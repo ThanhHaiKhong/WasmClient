@@ -15,7 +15,7 @@ extension WasmActor {
         params: [String: String] = [:]
     ) async throws -> T {
         let instance = try await readyEngine()
-        let action = try delegate.resolveAction(actionID: WasmClient.ActionID.livescore.rawValue)
+        let action = try await delegate.resolveAction(actionID: WasmClient.ActionID.livescore.rawValue, logger: logger)
         var args: [String: Google_Protobuf_Value] = [
             "endpoint": Google_Protobuf_Value(numberValue: Double(endpoint.rawValue)),
         ]
@@ -168,7 +168,7 @@ extension WasmActor {
 
     func highlights(competition: String?, team: String?) async throws -> [WasmClient.Highlight] {
         let instance = try await readyEngine()
-        let action = try delegate.resolveAction(actionID: WasmClient.ActionID.lsHighlights.rawValue)
+        let action = try await delegate.resolveAction(actionID: WasmClient.ActionID.lsHighlights.rawValue, logger: logger)
         var args: [String: Google_Protobuf_Value] = [:]
         if let c = competition { args["competition"] = Google_Protobuf_Value(stringValue: c) }
         if let t = team { args["team"] = Google_Protobuf_Value(stringValue: t) }

@@ -125,7 +125,7 @@ extension WasmActor {
         if let modelId {
             args["model_id"] = Google_Protobuf_Value(stringValue: modelId)
         }
-        let action = try delegate.resolveAction(actionID: WasmClient.ActionID.tryOn.rawValue)
+        let action = try await delegate.resolveAction(actionID: WasmClient.ActionID.tryOn.rawValue, logger: logger)
         let task = try await instance.create(action: action, args: args)
         return mapTryOnResult(task)
     }
@@ -151,7 +151,7 @@ extension WasmActor {
         args: [String: Google_Protobuf_Value]
     ) async throws -> T {
         let instance = try await readyEngine()
-        let action = try delegate.resolveAction(actionID: actionID.rawValue)
+        let action = try await delegate.resolveAction(actionID: actionID.rawValue, logger: logger)
         return try await instance.run(action: action, args: args)
     }
 

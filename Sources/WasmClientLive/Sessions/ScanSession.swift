@@ -17,7 +17,7 @@ extension WasmActor {
         logger("Scan: uploaded image → \(imageURL)")
 
         // Step 2: run scan action
-        let scanAction = try delegate.resolveAction(actionID: WasmClient.ActionID.scan.rawValue)
+        let scanAction = try await delegate.resolveAction(actionID: WasmClient.ActionID.scan.rawValue, logger: logger)
         var args: [String: Google_Protobuf_Value] = [
             "file": Google_Protobuf_Value(stringValue: imageURL),
         ]
@@ -35,7 +35,7 @@ extension WasmActor {
     /// Run visual search on an already-uploaded image URL.
     func visualSearch(imageURL: String) async throws -> [WasmClient.ShoppingProduct] {
         let instance = try await readyEngine()
-        let action = try delegate.resolveAction(actionID: WasmClient.ActionID.visualSearch.rawValue)
+        let action = try await delegate.resolveAction(actionID: WasmClient.ActionID.visualSearch.rawValue, logger: logger)
         let args: [String: Google_Protobuf_Value] = [
             "file": Google_Protobuf_Value(stringValue: imageURL),
         ]
@@ -50,7 +50,7 @@ extension WasmActor {
     /// Search for shopping products by text query.
     func shopping(query: String) async throws -> [WasmClient.ShoppingProduct] {
         let instance = try await readyEngine()
-        let action = try delegate.resolveAction(actionID: WasmClient.ActionID.shopping.rawValue)
+        let action = try await delegate.resolveAction(actionID: WasmClient.ActionID.shopping.rawValue, logger: logger)
         let args: [String: Google_Protobuf_Value] = [
             "query": Google_Protobuf_Value(stringValue: query),
         ]

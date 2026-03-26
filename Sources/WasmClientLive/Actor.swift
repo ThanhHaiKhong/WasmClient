@@ -34,10 +34,7 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
 
     // MARK: - Engine Lifecycle
 
-    /// Build, start the engine, discover action providers.
-    ///
-    /// After start(), polls actions() until providers register (up to 30s).
-    /// Simple polling — no task group deadlock risk.
+    /// Build and start the engine. Action discovery is deferred to first use.
     func ensureStarted(logger: @escaping @Sendable (String) -> Void) async throws -> TaskWasmProtocol {
         if let engine, isStarted { return engine }
         self.logger = logger
@@ -61,19 +58,25 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         logger("Starting engine (delegate set)...")
         stateContinuation?.yield(.starting)
         try await instance.start()
-        logger("Engine start() returned, discovering providers...")
+        logger("Engine started — action discovery deferred to first use")
 
-        // Store engine immediately — it IS running once start() returns.
         engine = instance
         isStarted = true
+        stateContinuation?.yield(.running)
+        return instance
+    }
 
-        // Poll actions() until providers register. The WASM pool may throw
-        // during .reload state; empty results and errors are both retried.
+    /// Poll the engine for action providers. Called lazily on first
+    /// resolveAction() or explicitly via refreshActions().
+    func ensureActionsLoaded(logger: @escaping @Sendable (String) -> Void) async throws {
+        guard actionCache.isEmpty else { return }
+        guard let engine else { throw WasmClient.Error.engineNotStarted }
+
+        logger("Discovering action providers...")
         var cache: [String: [WaTAction]] = [:]
         for attempt in 1...60 { // 60 × 500ms = 30s
-            try Task.checkCancellation()
             do {
-                let all = try await instance.actions()
+                let all = try await engine.actions()
                 if !all.actions.isEmpty {
                     for action in all.actions {
                         cache[action.id, default: []].append(action)
@@ -81,8 +84,7 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
                     logger("Actions available after \(attempt) poll(s)")
                     break
                 }
-            } catch is CancellationError { throw CancellationError() }
-            catch { logger("Poll \(attempt)/60: \(error)") }
+            } catch { logger("Poll \(attempt)/60: \(error)") }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
 
@@ -93,10 +95,8 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
             }
             logger("Cached \(cache.count) action types")
         } else {
-            logger("warning: no action providers registered")
+            logger("warning: no action providers registered after 30s")
         }
-        stateContinuation?.yield(.running)
-        return instance
     }
 
     /// Re-poll the engine for available actions. Call this to retry action
@@ -149,8 +149,11 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         }
     }
 
-    /// Resolve an action from the pre-loaded cache.
-    func resolveAction(actionID: String) throws -> WaTAction {
+    /// Resolve an action — lazily discovers providers on first call.
+    func resolveAction(actionID: String, logger: @escaping @Sendable (String) -> Void) async throws -> WaTAction {
+        if actionCache.isEmpty {
+            try await ensureActionsLoaded(logger: logger)
+        }
         guard let actions = actionCache[actionID], let action = actions.first else {
             throw WasmClient.Error.noProviderFound(action: actionID)
         }
@@ -237,8 +240,11 @@ actor WasmActor {
         try await delegate.refreshActions(logger: logger)
     }
 
-    func availableActions() throws -> [WasmClient.ActionInfo] {
-        delegate.allActions().map { action in
+    func availableActions() async throws -> [WasmClient.ActionInfo] {
+        if delegate.allActions().isEmpty {
+            try await delegate.ensureActionsLoaded(logger: logger)
+        }
+        return delegate.allActions().map { action in
             WasmClient.ActionInfo(
                 id: action.id,
                 provider: action.provider,

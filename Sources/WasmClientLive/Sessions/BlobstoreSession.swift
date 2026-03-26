@@ -15,7 +15,7 @@ extension WasmActor {
         try imageData.write(to: tempURL)
         defer { try? FileManager.default.removeItem(at: tempURL) }
 
-        let action = try delegate.resolveAction(actionID: WasmClient.ActionID.upload.rawValue)
+        let action = try await delegate.resolveAction(actionID: WasmClient.ActionID.upload.rawValue, logger: logger)
         let args: [String: Google_Protobuf_Value] = [
             "file": Google_Protobuf_Value(stringValue: tempURL.absoluteString),
             "filename": Google_Protobuf_Value(stringValue: filename),
@@ -34,7 +34,7 @@ extension WasmActor {
     /// Upload a local file by path to blobstore, returning the hosted URL.
     func uploadFile(filePath: String, filename: String) async throws -> String {
         let instance = try await readyEngine()
-        let action = try delegate.resolveAction(actionID: WasmClient.ActionID.upload.rawValue)
+        let action = try await delegate.resolveAction(actionID: WasmClient.ActionID.upload.rawValue, logger: logger)
         let args: [String: Google_Protobuf_Value] = [
             "file": Google_Protobuf_Value(stringValue: filePath),
             "filename": Google_Protobuf_Value(stringValue: filename),
