@@ -39,13 +39,15 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
 
     // MARK: - Engine Lifecycle
 
-    /// Build, start the engine, wait for `.running` delegate callback, then load actions.
+    /// Build, start the engine, discover action providers.
     ///
-    /// Matches the flow-kit-example pattern:
+    /// Hybrid approach:
     ///   1. `TaskWasm.default()` + `premium = true` + `delegate = self`
     ///   2. `instance.start()` (no @MainActor — example runs from SwiftUI .task)
-    ///   3. Wait for `.running` delegate callback (signals pool is ready)
-    ///   4. Call `actions()` once to populate the cache
+    ///   3. Try waiting for `.running` delegate callback (5s) — if it fires,
+    ///      call `actions()` once like the example
+    ///   4. If `.running` doesn't fire (some FlowKit versions skip it), fall
+    ///      back to polling `actions()` until providers register
     func ensureStarted(logger: @escaping @Sendable (String) -> Void) async throws -> TaskWasmProtocol {
         if let engine, isStarted { return engine }
         self.logger = logger
@@ -60,51 +62,73 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         logger("Starting engine (delegate set)...")
         stateContinuation?.yield(.starting)
         try await instance.start()
-        logger("Engine start() returned, waiting for .running state...")
+        logger("Engine start() returned, discovering providers...")
 
         // Store engine immediately — it IS running once start() returns.
         engine = instance
         isStarted = true
 
-        // Wait for .running delegate callback (with timeout).
-        // The example gates action loading behind .running — providers register
-        // asynchronously and .running signals they're ready.
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    self.runningContinuation = continuation
+        // Phase 1: wait briefly for .running delegate callback (5s).
+        // Some FlowKit versions fire .running when the pool is ready.
+        var gotRunning = false
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                        self.runningContinuation = cont
+                    }
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: 5_000_000_000) // 5s
+                }
+                try await group.next()
+                group.cancelAll()
+            }
+            gotRunning = runningContinuation == nil
+            runningContinuation?.resume()
+            runningContinuation = nil
+        } catch {
+            runningContinuation?.resume()
+            runningContinuation = nil
+        }
+
+        // Phase 2: load actions — single call if .running fired, otherwise poll.
+        var cache: [String: [WaTAction]] = [:]
+
+        if gotRunning {
+            logger(".running received — loading actions once...")
+            if let all = try? await instance.actions() {
+                for action in all.actions {
+                    cache[action.id, default: []].append(action)
                 }
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: 30_000_000_000) // 30s timeout
-            }
-            // First to finish wins — either .running fires or timeout
-            try await group.next()
-            group.cancelAll()
-        }
-
-        if runningContinuation != nil {
-            // Timeout — .running never fired
-            runningContinuation = nil
-            logger("warning: .running state not received within 30s, attempting actions() anyway")
         } else {
-            logger(".running state received, loading actions...")
-        }
-
-        // Load actions once (like the example's SettingsView.loadActions)
-        var cache: [String: [WaTAction]] = [:]
-        if let allActions = try? await instance.actions() {
-            for action in allActions.actions {
-                cache[action.id, default: []].append(action)
-                logger("  Cached action: id=\(action.id) name=\(action.name) provider=\(action.provider)")
+            logger(".running not received — polling actions()...")
+            for attempt in 1...50 { // 50 × 500ms = 25s
+                try Task.checkCancellation()
+                do {
+                    let all = try await instance.actions()
+                    if !all.actions.isEmpty {
+                        for action in all.actions {
+                            cache[action.id, default: []].append(action)
+                        }
+                        logger("Actions available after \(attempt) poll(s)")
+                        break
+                    }
+                } catch is CancellationError { throw CancellationError() }
+                catch { logger("Poll \(attempt)/50: \(error)") }
+                try await Task.sleep(nanoseconds: 500_000_000)
             }
         }
 
-        if cache.isEmpty {
-            logger("warning: engine running but no action providers registered")
-        } else {
+        if !cache.isEmpty {
             actionCache = cache
+            for (id, actions) in cache {
+                logger("  \(id): \(actions.map(\.provider).joined(separator: ", "))")
+            }
             logger("Cached \(cache.count) action types")
+        } else {
+            logger("warning: no action providers registered")
         }
         stateContinuation?.yield(.running)
         return instance
