@@ -15,8 +15,6 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
     private var logger: (@Sendable (String) -> Void)?
     /// Continuation for engine state stream.
     var stateContinuation: AsyncStream<WasmClient.EngineState>.Continuation?
-    /// One-shot continuation to signal when `.running` fires from delegate.
-    private var runningContinuation: CheckedContinuation<Void, Never>?
 
     // MARK: - WasmInstanceDelegate
 
@@ -26,9 +24,6 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         switch state {
         case .running:
             mapped = .running
-            // Resume anyone waiting for .running
-            runningContinuation?.resume()
-            runningContinuation = nil
         case .reload:
             mapped = .starting
         default:
@@ -41,13 +36,8 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
 
     /// Build, start the engine, discover action providers.
     ///
-    /// Hybrid approach:
-    ///   1. `TaskWasm.default()` + `premium = true` + `delegate = self`
-    ///   2. `instance.start()` (no @MainActor — example runs from SwiftUI .task)
-    ///   3. Try waiting for `.running` delegate callback (5s) — if it fires,
-    ///      call `actions()` once like the example
-    ///   4. If `.running` doesn't fire (some FlowKit versions skip it), fall
-    ///      back to polling `actions()` until providers register
+    /// After start(), polls actions() until providers register (up to 30s).
+    /// Simple polling — no task group deadlock risk.
     func ensureStarted(logger: @escaping @Sendable (String) -> Void) async throws -> TaskWasmProtocol {
         if let engine, isStarted { return engine }
         self.logger = logger
@@ -68,57 +58,23 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         engine = instance
         isStarted = true
 
-        // Phase 1: wait briefly for .running delegate callback (5s).
-        // Some FlowKit versions fire .running when the pool is ready.
-        var gotRunning = false
-        do {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                        self.runningContinuation = cont
-                    }
-                }
-                group.addTask {
-                    try await Task.sleep(nanoseconds: 5_000_000_000) // 5s
-                }
-                try await group.next()
-                group.cancelAll()
-            }
-            gotRunning = runningContinuation == nil
-            runningContinuation?.resume()
-            runningContinuation = nil
-        } catch {
-            runningContinuation?.resume()
-            runningContinuation = nil
-        }
-
-        // Phase 2: load actions — single call if .running fired, otherwise poll.
+        // Poll actions() until providers register. The WASM pool may throw
+        // during .reload state; empty results and errors are both retried.
         var cache: [String: [WaTAction]] = [:]
-
-        if gotRunning {
-            logger(".running received — loading actions once...")
-            if let all = try? await instance.actions() {
-                for action in all.actions {
-                    cache[action.id, default: []].append(action)
-                }
-            }
-        } else {
-            logger(".running not received — polling actions()...")
-            for attempt in 1...50 { // 50 × 500ms = 25s
-                try Task.checkCancellation()
-                do {
-                    let all = try await instance.actions()
-                    if !all.actions.isEmpty {
-                        for action in all.actions {
-                            cache[action.id, default: []].append(action)
-                        }
-                        logger("Actions available after \(attempt) poll(s)")
-                        break
+        for attempt in 1...60 { // 60 × 500ms = 30s
+            try Task.checkCancellation()
+            do {
+                let all = try await instance.actions()
+                if !all.actions.isEmpty {
+                    for action in all.actions {
+                        cache[action.id, default: []].append(action)
                     }
-                } catch is CancellationError { throw CancellationError() }
-                catch { logger("Poll \(attempt)/50: \(error)") }
-                try await Task.sleep(nanoseconds: 500_000_000)
-            }
+                    logger("Actions available after \(attempt) poll(s)")
+                    break
+                }
+            } catch is CancellationError { throw CancellationError() }
+            catch { logger("Poll \(attempt)/60: \(error)") }
+            try await Task.sleep(nanoseconds: 500_000_000)
         }
 
         if !cache.isEmpty {
