@@ -44,6 +44,15 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
 
         Self.installWasmBinaryIfNeeded(logger: logger)
 
+        // If no downloaded version exists, clear any bad cache state so
+        // WasmUpdateManager inside TaskWasm.default() triggers a fresh download.
+        if AsyncifyWasm.currentVersionID == nil {
+            logger("No cached wasm version — resetting downloads to force fresh download")
+            AsyncifyWasm.resetDownloads()
+        } else {
+            logger("Using cached wasm version: \(AsyncifyWasm.currentVersionID!)")
+        }
+
         logger("Building engine via TaskWasm.default()...")
         var instance = try await TaskWasm.default()
         instance.premium = true
