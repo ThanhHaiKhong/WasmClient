@@ -205,7 +205,6 @@ actor WasmActor {
     func start() async throws {
         delegate.stateContinuation?.yield(.starting)
         _ = try await readyEngine()
-        try await delegate.ensureActionsLoaded(logger: logger)
     }
 
     func observeEngineState() -> AsyncStream<WasmClient.EngineState> {
@@ -232,7 +231,6 @@ actor WasmActor {
     func warmUp() async {
         do {
             _ = try await readyEngine()
-            try await delegate.ensureActionsLoaded(logger: logger)
         } catch {
             logger("Warm-up failed (non-fatal): \(error.localizedDescription)")
         }
