@@ -3,37 +3,6 @@ import PackageDescription
 
 let packageDir = Context.packageDirectory
 
-// FlowKit.xcframework contains sub-modules (AsyncWasm, TaskWasm, etc.) that
-// aren't exposed as SPM products. We need -I flags pointing to the framework's
-// Modules/ directory so the compiler can resolve them.
-//
-// The xcframework lives in different locations depending on the build context:
-//   - Local (root package): .build/artifacts/flow-kit/FlowKit/FlowKit.xcframework
-//   - Consumer (dependency):  ../../artifacts/flow-kit/FlowKit/FlowKit.xcframework
-//
-// We add both device and simulator slice paths — the compiler picks the correct
-// architecture and silently ignores paths that don't exist.
-let flowKitModulePaths: [String] = {
-    let xcfwPaths = [
-        // Local development (WasmClient is the root package)
-        "\(packageDir)/.build/artifacts/flow-kit/FlowKit/FlowKit.xcframework",
-        // Consumed as a dependency (Xcode or SPM resolver)
-        "\(packageDir)/../../artifacts/flow-kit/FlowKit/FlowKit.xcframework",
-    ]
-    let slices = [
-        "ios-arm64/FlowKit.framework/Modules",
-        "ios-arm64_x86_64-simulator/FlowKit.framework/Modules",
-    ]
-    // Also keep the pre-merged directory for backwards compatibility
-    var paths = ["-I", "\(packageDir)/.build/flowkit-merged-modules"]
-    for xcfw in xcfwPaths {
-        for slice in slices {
-            paths += ["-I", "\(xcfw)/\(slice)"]
-        }
-    }
-    return paths
-}()
-
 let package = Package(
     name: "WasmClient",
     platforms: [
@@ -74,8 +43,18 @@ let package = Package(
                 "WasmClient",
             ],
             swiftSettings: [
-                .unsafeFlags(flowKitModulePaths),
+                // Merged sub-module directory created by MergeFlowKitModules plugin.
+                // Contains AsyncWasm, TaskWasm, etc. but NOT FlowKit/SwiftProtobuf
+                // (those are resolved by SPM to the correct xcframework slice).
+                .unsafeFlags(["-I", "\(packageDir)/.build/flowkit-merged-modules"]),
+            ],
+            plugins: [
+                .plugin(name: "MergeFlowKitModules"),
             ]
+        ),
+        .plugin(
+            name: "MergeFlowKitModules",
+            capability: .buildTool()
         ),
     ]
 )
