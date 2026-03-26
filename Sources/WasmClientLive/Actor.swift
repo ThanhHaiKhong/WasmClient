@@ -15,6 +15,10 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
     private var logger: (@Sendable (String) -> Void)?
     /// Continuation for engine state stream.
     var stateContinuation: AsyncStream<WasmClient.EngineState>.Continuation?
+    /// One-shot continuation resolved when the delegate receives `.running`.
+    /// Used by ensureStarted() to wait for the engine to be truly ready
+    /// (matching flow-kit-example's WasmContainerView pattern).
+    private var runningContinuation: CheckedContinuation<Void, Never>?
 
     // MARK: - WasmInstanceDelegate
 
@@ -24,6 +28,9 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         switch state {
         case .running:
             mapped = .running
+            // Resume anyone waiting for the engine to be truly running.
+            runningContinuation?.resume()
+            runningContinuation = nil
         case .reload:
             mapped = .starting
         default:
@@ -58,7 +65,16 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         logger("Starting engine (delegate set)...")
         stateContinuation?.yield(.starting)
         try await instance.start()
-        logger("Engine started")
+        logger("Engine start() returned, waiting for delegate .running callback...")
+
+        // Wait for the delegate's stateChanged(.running) callback.
+        // FlowKit fires this AFTER start() returns, once the engine is truly ready
+        // with providers registered. Without this wait, engine.actions() returns
+        // empty because the internal state machine hasn't reached .running yet.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            self.runningContinuation = continuation
+        }
+        logger("Engine delegate confirmed .running")
 
         engine = instance
         isStarted = true
