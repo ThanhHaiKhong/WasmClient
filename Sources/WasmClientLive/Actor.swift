@@ -58,7 +58,7 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         logger("Starting engine (delegate set)...")
         stateContinuation?.yield(.starting)
         try await instance.start()
-        logger("Engine started — action discovery deferred to first use")
+        logger("Engine started")
 
         engine = instance
         isStarted = true
@@ -205,6 +205,7 @@ actor WasmActor {
     func start() async throws {
         delegate.stateContinuation?.yield(.starting)
         _ = try await readyEngine()
+        try await delegate.ensureActionsLoaded(logger: logger)
     }
 
     func observeEngineState() -> AsyncStream<WasmClient.EngineState> {
@@ -231,6 +232,7 @@ actor WasmActor {
     func warmUp() async {
         do {
             _ = try await readyEngine()
+            try await delegate.ensureActionsLoaded(logger: logger)
         } catch {
             logger("Warm-up failed (non-fatal): \(error.localizedDescription)")
         }
@@ -241,6 +243,9 @@ actor WasmActor {
     }
 
     func availableActions() async throws -> [WasmClient.ActionInfo] {
+        if !delegate.isStarted {
+            _ = try await readyEngine()
+        }
         if delegate.allActions().isEmpty {
             try await delegate.ensureActionsLoaded(logger: logger)
         }
