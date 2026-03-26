@@ -15,6 +15,8 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
     private var logger: (@Sendable (String) -> Void)?
     /// Continuation for engine state stream.
     var stateContinuation: AsyncStream<WasmClient.EngineState>.Continuation?
+    /// One-shot continuation to signal when `.running` fires from delegate.
+    private var runningContinuation: CheckedContinuation<Void, Never>?
 
     // MARK: - WasmInstanceDelegate
 
@@ -24,6 +26,9 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         switch state {
         case .running:
             mapped = .running
+            // Resume anyone waiting for .running
+            runningContinuation?.resume()
+            runningContinuation = nil
         case .reload:
             mapped = .starting
         default:
@@ -34,15 +39,13 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
 
     // MARK: - Engine Lifecycle
 
-    /// Build, start the engine, wait for it to stabilize, then cache actions.
+    /// Build, start the engine, wait for `.running` delegate callback, then load actions.
     ///
-    /// Engine lifecycle observed in production:
-    ///   `start()` → `.reload(version)` → (WASM pool stabilizes) → `actions()` works
-    ///   `.running` does NOT fire for this FlowKit version.
-    ///
-    /// The WASM pool throws AsyncifyWasmPoolError if queried during `.reload`.
-    /// Strategy: after `start()`, poll `actions()` with error catching until the
-    /// pool stabilizes and providers register. Simple, no race conditions.
+    /// Matches the flow-kit-example pattern:
+    ///   1. `TaskWasm.default()` + `premium = true` + `delegate = self`
+    ///   2. `instance.start()` (no @MainActor — example runs from SwiftUI .task)
+    ///   3. Wait for `.running` delegate callback (signals pool is ready)
+    ///   4. Call `actions()` once to populate the cache
     func ensureStarted(logger: @escaping @Sendable (String) -> Void) async throws -> TaskWasmProtocol {
         if let engine, isStarted { return engine }
         self.logger = logger
@@ -52,58 +55,58 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         logger("Building engine via TaskWasm.default()...")
         var instance = try await TaskWasm.default()
         instance.premium = true
-
         instance.delegate = self
 
-        // Start on the main actor — flow-kit-example always starts from SwiftUI views
-        // (main thread). FlowKit's WASM engine may require main thread for full init.
-        logger("Starting engine (delegate set, main actor)...")
+        logger("Starting engine (delegate set)...")
         stateContinuation?.yield(.starting)
-        try await Self.startOnMain(instance)
-        logger("Engine start() returned, discovering action providers...")
+        try await instance.start()
+        logger("Engine start() returned, waiting for .running state...")
 
-        // Store the engine immediately — it IS running even if providers
-        // haven't registered yet. The flow-kit-example separates engine start
-        // from action discovery: the engine is usable once start() returns.
+        // Store engine immediately — it IS running once start() returns.
         engine = instance
         isStarted = true
 
-        // Poll for actions. Providers register asynchronously after start() —
-        // the WASM pool may throw during .reload state, and actions() returns
-        // empty until providers connect to the backend. Both are caught and retried.
-        var cache: [String: [WaTAction]] = [:]
-        for attempt in 1...60 { // 60 × 500ms = 30s max
-            try Task.checkCancellation()
-            do {
-                let allActions = try await instance.actions()
-                if !allActions.actions.isEmpty {
-                    for action in allActions.actions {
-                        cache[action.id, default: []].append(action)
-                        logger("  Cached action: id=\(action.id) name=\(action.name) provider=\(action.provider)")
-                    }
-                    logger("Cached \(cache.count) action types (\(allActions.actions.count) total providers) after \(attempt) attempt(s)")
-                    break
+        // Wait for .running delegate callback (with timeout).
+        // The example gates action loading behind .running — providers register
+        // asynchronously and .running signals they're ready.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    self.runningContinuation = continuation
                 }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                logger("Poll \(attempt)/60: \(error)")
             }
-            try await Task.sleep(nanoseconds: 500_000_000) // 500ms
+            group.addTask {
+                try await Task.sleep(nanoseconds: 30_000_000_000) // 30s timeout
+            }
+            // First to finish wins — either .running fires or timeout
+            try await group.next()
+            group.cancelAll()
+        }
+
+        if runningContinuation != nil {
+            // Timeout — .running never fired
+            runningContinuation = nil
+            logger("warning: .running state not received within 30s, attempting actions() anyway")
+        } else {
+            logger(".running state received, loading actions...")
+        }
+
+        // Load actions once (like the example's SettingsView.loadActions)
+        var cache: [String: [WaTAction]] = [:]
+        if let allActions = try? await instance.actions() {
+            for action in allActions.actions {
+                cache[action.id, default: []].append(action)
+                logger("  Cached action: id=\(action.id) name=\(action.name) provider=\(action.provider)")
+            }
         }
 
         if cache.isEmpty {
-            // Engine is running but no providers registered — likely a network
-            // issue. Mark as running anyway; actions can be retried later via
-            // refreshActions(). This matches the flow-kit-example behavior where
-            // the engine transitions to .running independently of action discovery.
-            logger("warning: engine running but no action providers registered (network issue?)")
-            stateContinuation?.yield(.running)
+            logger("warning: engine running but no action providers registered")
         } else {
             actionCache = cache
-            stateContinuation?.yield(.running)
+            logger("Cached \(cache.count) action types")
         }
-
+        stateContinuation?.yield(.running)
         return instance
     }
 
@@ -155,12 +158,6 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         } catch {
             logger("warning: failed to install base.wasm — \(error.localizedDescription)")
         }
-    }
-
-    /// Start the engine on the main actor — FlowKit requires main thread.
-    @MainActor
-    private static func startOnMain(_ instance: TaskWasmProtocol) async throws {
-        try await instance.start()
     }
 
     /// Resolve an action from the pre-loaded cache.
