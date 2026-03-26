@@ -46,6 +46,10 @@ public struct WasmClient: Sendable {
     /// List all available actions from the running engine.
     public var availableActions: @Sendable () async throws -> [WasmClient.ActionInfo]
 
+    /// Re-poll the engine for action providers. Use after a network-related
+    /// failure during initial startup to retry provider discovery.
+    public var refreshActions: @Sendable () async throws -> Void
+
     // MARK: - Blobstore
 
     /// Upload image data, returning the hosted URL.

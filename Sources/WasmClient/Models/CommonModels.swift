@@ -45,6 +45,7 @@ extension WasmClient {
     /// Typed errors for all client operations.
     public enum Error: Swift.Error, Sendable, Equatable, LocalizedError {
         case engineNotReady
+        case engineNotStarted
         case engineInitFailed
         case noProviderFound(action: String)
         case taskFailed(status: String)
@@ -58,6 +59,8 @@ extension WasmClient {
             switch self {
             case .engineNotReady:
                 "The WASM engine is not ready. Please try again."
+            case .engineNotStarted:
+                "The WASM engine has not been started. Call start() first."
             case .engineInitFailed:
                 "The WASM engine failed to initialize."
             case .noProviderFound(let action):

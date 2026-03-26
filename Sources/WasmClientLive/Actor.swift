@@ -60,10 +60,17 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         logger("Starting engine (delegate set, main actor)...")
         stateContinuation?.yield(.starting)
         try await Self.startOnMain(instance)
-        logger("Engine start() returned, waiting for actions to become available...")
+        logger("Engine start() returned, discovering action providers...")
 
-        // Poll for actions. The WASM pool throws during .reload state and actions()
-        // returns empty until providers register. Both are caught and retried.
+        // Store the engine immediately — it IS running even if providers
+        // haven't registered yet. The flow-kit-example separates engine start
+        // from action discovery: the engine is usable once start() returns.
+        engine = instance
+        isStarted = true
+
+        // Poll for actions. Providers register asynchronously after start() —
+        // the WASM pool may throw during .reload state, and actions() returns
+        // empty until providers connect to the backend. Both are caught and retried.
         var cache: [String: [WaTAction]] = [:]
         for attempt in 1...60 { // 60 × 500ms = 30s max
             try Task.checkCancellation()
@@ -85,16 +92,34 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
             try await Task.sleep(nanoseconds: 500_000_000) // 500ms
         }
 
-        guard !cache.isEmpty else {
-            stateContinuation?.yield(.failed("Engine init failed — no actions registered"))
-            throw WasmClient.Error.engineInitFailed
+        if cache.isEmpty {
+            // Engine is running but no providers registered — likely a network
+            // issue. Mark as running anyway; actions can be retried later via
+            // refreshActions(). This matches the flow-kit-example behavior where
+            // the engine transitions to .running independently of action discovery.
+            logger("warning: engine running but no action providers registered (network issue?)")
+            stateContinuation?.yield(.running)
+        } else {
+            actionCache = cache
+            stateContinuation?.yield(.running)
         }
 
-        actionCache = cache
-        engine = instance
-        isStarted = true
-        stateContinuation?.yield(.running)
         return instance
+    }
+
+    /// Re-poll the engine for available actions. Call this to retry action
+    /// discovery after a network-related failure during initial startup.
+    func refreshActions(logger: @escaping @Sendable (String) -> Void) async throws {
+        guard let engine else { throw WasmClient.Error.engineNotStarted }
+        let allActions = try await engine.actions()
+        var cache: [String: [WaTAction]] = [:]
+        for action in allActions.actions {
+            cache[action.id, default: []].append(action)
+        }
+        if !cache.isEmpty {
+            actionCache = cache
+            logger("Refreshed \(cache.count) action types (\(allActions.actions.count) total providers)")
+        }
     }
 
     /// Copy the bundled raw `base.wasm` from WasmClientLive's SPM resource bundle
@@ -220,6 +245,10 @@ actor WasmActor {
         } catch {
             logger("Warm-up failed (non-fatal): \(error.localizedDescription)")
         }
+    }
+
+    func refreshActions() async throws {
+        try await delegate.refreshActions(logger: logger)
     }
 
     func availableActions() throws -> [WasmClient.ActionInfo] {

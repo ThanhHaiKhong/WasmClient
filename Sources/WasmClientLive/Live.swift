@@ -30,6 +30,9 @@ extension WasmClient: DependencyKey {
             availableActions: {
                 try await actor.availableActions()
             },
+            refreshActions: {
+                try await actor.refreshActions()
+            },
             uploadImage: { imageData in
                 try await actor.uploadImage(imageData: imageData)
             },
