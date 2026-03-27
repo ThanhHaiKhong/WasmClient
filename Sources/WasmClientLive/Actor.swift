@@ -19,6 +19,9 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
     /// Used by ensureStarted() to wait for the engine to be truly ready
     /// (matching flow-kit-example's WasmContainerView pattern).
     private var runningContinuation: CheckedContinuation<Void, Never>?
+    /// Flag set when stateChanged(.running) fires — guards against the race
+    /// where the callback arrives before withCheckedContinuation stores itself.
+    private var engineDidReachRunning = false
 
     // MARK: - WasmInstanceDelegate
 
@@ -28,6 +31,7 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         switch state {
         case .running:
             mapped = .running
+            engineDidReachRunning = true
             // Resume anyone waiting for the engine to be truly running.
             runningContinuation?.resume()
             runningContinuation = nil
@@ -71,8 +75,18 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
         // FlowKit fires this AFTER start() returns, once the engine is truly ready
         // with providers registered. Without this wait, engine.actions() returns
         // empty because the internal state machine hasn't reached .running yet.
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            self.runningContinuation = continuation
+        //
+        // Guard: if stateChanged(.running) already fired during start(), skip
+        // the continuation entirely to avoid a leaked-continuation hang.
+        if !engineDidReachRunning {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                if self.engineDidReachRunning {
+                    // .running arrived between the if-check and here — resume immediately.
+                    continuation.resume()
+                } else {
+                    self.runningContinuation = continuation
+                }
+            }
         }
         logger("Engine delegate confirmed .running")
 
@@ -180,6 +194,7 @@ internal final class WasmDelegate: NSObject, WasmInstanceDelegate, @unchecked Se
     func resetEngine() {
         engine = nil
         isStarted = false
+        engineDidReachRunning = false
         actionCache = [:]
         stateContinuation?.yield(.stopped)
     }
