@@ -1,0 +1,23 @@
+# xcodegen/wasm-postbuild.yml
+#
+# XcodeGen integration guide for projects that consume WasmClient via a Features package.
+#
+# Usage in your project.yml:
+#
+#   settings:
+#     base:
+#       ENABLE_USER_SCRIPT_SANDBOXING: NO    # required for fix script
+#
+#   targets:
+#     YourApp:
+#       postBuildScripts:
+#         - name: Fix Wasm Resource
+#           script: |
+#             SCRIPT="${SRCROOT}/../Features/.build/checkouts/WasmClient/scripts/fix-wasm-corruption.sh"
+#             [ -x "$SCRIPT" ] && "$SCRIPT" || echo "warning: fix-wasm-corruption.sh not found at $SCRIPT"
+#           basedOnDependencyAnalysis: false
+#
+# Requirements:
+#   1. ENABLE_USER_SCRIPT_SANDBOXING: NO  (project-level setting)
+#   2. Features package at ../Features that depends on WasmClient
+#   3. XcodeGen project (traditional PBXFileReference format)
